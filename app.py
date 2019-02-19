@@ -1,71 +1,79 @@
 import os
+from io import BytesIO
+
+from PIL import Image
 
 from flask import Flask, request, jsonify, abort
-from pymongo import MongoClient
-from bson.json_util import dumps
-from werkzeug.utils import secure_filename
-from image_processing import ImageProcessingThread
+from flask_mongoengine import wtf
+from models import *
+from flask_wtf import CSRFProtect
 
 UPLOAD_FOLDER = '/IMAGES/'
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.debug = True
+app.config['MONGODB_SETTINGS'] = {'DB': 'TESTDB'}
+app.config.update(dict(
+    SECRET_KEY="secret1",
+    WTF_CSRF_SECRET_KEY="secret2",
+    WTF_CSRF_ENABLED=False
 
-client = MongoClient('localhost', 27017)
-db = client.app_database
-processing = ImageProcessingThread(db.images)
-processing.start()
+))
+db.init_app(app)
+csrf = CSRFProtect()
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(port=27017)
+    csrf.init_app(app)
 
 
 @app.route("/user/create", methods=['POST'])
 def create_user():
-    # Add better verification of data and to something with the key names
-    form_data = request.form
-    user_collection = db.user_collection
-    username = form_data.get("username")
-    email = form_data.get("email")
-    password = form_data.get("password")
-    first_name = form_data.get("first_name")
-    last_name = form_data.get("last_name")
-
-    if all(v is not None for v in [username, password, email, password, first_name, last_name]):
-        user_id = user_collection.insert({
-            "username": username,
-            "email": email,
-            "password": password,
-            "first_name": first_name,
-            "last_name": last_name
-        })
-        return "That fucinkg worked the useri id is  {}".format(user_id)
+    form = wtf.model_form(User)(request.form)
+    if not form.validate():
+        return jsonify({"errors": form.errors}), 400
     else:
-        return abort(400, "Bad request data missing")
+        user = form.save()
+        return jsonify(user)
 
 
 @app.route("/user", methods=['GET'])
 def get_user():
     # Make the query take into account all args sent with the keys
-    args = request.args
-    users = db.user_collection.find({"username": args.get("username")})
-    return dumps(users)
+    user_id = request.args.get("user_id")
+    if user_id is None:
+        users = User.objects()
+    else:
+        users = User.objects(id=user_id).first()
+    return jsonify(users)
 
 
-@app.route("/upload", methods=['POST'])
+@app.route("/image/upload", methods=['POST'])
 def upload_image():
+    image_entry = ImageUpload()
+    # user = User.objects.get(id=request.form["user_id"])
+    # image_entry.user = user
     file = request.files["image"]
+    image_entry.image.new_file()
+    image_entry.image.write(file.stream)
+    image_entry.image.close()
 
-    if file is None:
-        abort(400, "Bad request , No file found")
-    if request.form.get("user_id") is None:
-        abort(400, "Bad request , User id not found")
-    filename = secure_filename(file.filename)
-    file.save(filename)
+    try:
+        image_entry.validate()
+    except ValidationError as e:
+        return jsonify({"errors": str(e)}), 400
 
-    image_id = db.images.insert({"user_id": request.form.get("user_id"),
-                                 "processed": False,
-                                 "path": app.root_path + "/" + filename}
-                                )
+    image_entry = image_entry.save()
+    return jsonify(image_entry)
 
-    return "File {name} saved with the id {}".format(image_id, name=filename)
+
+@app.route("/image", methods=['GET'])
+def get_image():
+    image_id = request.args.get("image_id")
+    image_entry = ImageUpload.objects(id=image_id).first()
+    photo = image_entry.image.read()
+    content_type = image_entry.image.content_type
+    im = Image.open(BytesIO(photo))
+    im.show()
+    return jsonify(image_entry.tags)
